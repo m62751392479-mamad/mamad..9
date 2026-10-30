@@ -1,0 +1,447 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>فرمانروایان</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:#17231d;color:white;font-family:tahoma;overflow:hidden}
+canvas{width:100vw;height:100vh;display:block;touch-action:none}
+#hud{position:absolute;top:8px;right:8px;left:8px;display:flex;justify-content:space-between;gap:8px;pointer-events:none}
+.panel{background:#111d1beF;border:1px solid #65756a;border-radius:10px;padding:9px;pointer-events:auto}
+#stats{font-size:12px;line-height:2}
+#buttons{display:flex;flex-wrap:wrap;gap:5px;justify-content:flex-end}
+button{background:#51452f;color:white;border:1px solid #a78b54;border-radius:7px;padding:8px;font:12px Tahoma}
+#message{position:absolute;bottom:10px;right:10px;max-width:80%;font-size:12px}
+#dialog{display:none;position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:90%;max-width:420px;background:#17231f;border:2px solid #b99a60;border-radius:12px;padding:15px}
+#dialog h3{color:#e7c77e}
+#dialog p{font-size:13px;line-height:2}
+#options{display:flex;gap:6px;flex-wrap:wrap}
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+
+<div id="hud">
+ <div class="panel" id="stats"></div>
+ <div class="panel" id="buttons">
+  <button onclick="talk()">گفت‌وگو</button>
+  <button onclick="recruit()">سربازگیری</button>
+  <button onclick="attack()">نبرد</button>
+  <button onclick="market()">بازار</button>
+  <button onclick="zoom(1.15)">زوم +</button>
+  <button onclick="zoom(.87)">زوم -</button>
+  <button onclick="save()">ذخیره</button>
+ </div>
+</div>
+
+<div id="message" class="panel">روی زمین بزن تا حرکت کنی. روی افراد و مکان‌ها بزن تا آن‌ها را انتخاب کنی.</div>
+
+<div id="dialog">
+ <h3 id="title"></h3>
+ <p id="description"></p>
+ <div id="options"></div>
+ <br><button onclick="closeDialog()">بستن</button>
+</div>
+
+<script>
+const canvas=document.getElementById("game");
+const ctx=canvas.getContext("2d");
+
+let W,H,D;
+function resize(){
+ D=Math.min(devicePixelRatio||1,2);
+ W=innerWidth;H=innerHeight;
+ canvas.width=W*D;canvas.height=H*D;
+ ctx.setTransform(D,0,0,D,0,0);
+}
+resize();addEventListener("resize",resize);
+
+const world={w:2600,h:1900};
+const player={
+ x:510,y:610,hp:100,gold:180,food:35,
+ fame:0,level:1,speed:170
+};
+
+const army={inf:5,arch:2,cav:1,spear:0};
+const camera={x:510,y:610,zoom:1};
+let target=null,selected=null,keys={};
+let last=performance.now();
+
+const factions=[
+ {name:"پادشاهی آذر",color:"#b9574c"},
+ {name:"اتحاد سپیدکوه",color:"#6487b1"},
+ {name:"قبیله دشت",color:"#b59a50"}
+];
+
+const places=[
+ {name:"آذرشهر",type:"شهر",x:510,y:510,f:0,pop:320},
+ {name:"دهکده سبز",type:"روستا",x:820,y:850,f:0,pop:90},
+ {name:"قلعه سنگی",type:"قلعه",x:1060,y:390,f:0,pop:70},
+ {name:"سپیددژ",type:"شهر",x:1900,y:510,f:1,pop:280},
+ {name:"روستای رود",type:"روستا",x:2150,y:850,f:1,pop:110},
+ {name:"دژ شمالی",type:"قلعه",x:1650,y:250,f:1,pop:60},
+ {name:"بازار دشت",type:"شهر",x:1450,y:1450,f:2,pop:210},
+ {name:"آبادی نخل",type:"روستا",x:1100,y:1650,f:2,pop:80}
+];
+
+const names=["بازرگان","نگهبان","کشاورز","فرمانده","مسافر","آهنگر","کماندار"];
+const npcs=[];
+for(let i=0;i<35;i++){
+ const p=places[i%places.length];
+ npcs.push({
+  name:names[i%names.length],
+  x:p.x+(Math.random()-.5)*200,
+  y:p.y+(Math.random()-.5)*160,
+  hx:p.x,hy:p.y,
+  dir:Math.random()*6.28,
+  phase:Math.random()*10,
+  speed:15+Math.random()*20,
+  bandit:i%9===0,
+  alive:true
+ });
+}
+
+const enemies=[];
+for(let i=0;i<13;i++){
+ enemies.push({
+  x:200+Math.random()*2200,
+  y:150+Math.random()*1600,
+  men:4+Math.floor(Math.random()*7),
+  hp:55,
+  speed:25+Math.random()*15,
+  phase:Math.random()*10,
+  alive:true
+ });
+}
+
+const trees=[];
+let seed=93271;
+function random(){
+ seed=(seed*1664525+1013904223)>>>0;
+ return seed/4294967296;
+}
+for(let i=0;i<400;i++){
+ trees.push({x:random()*world.w,y:random()*world.h,r:5+random()*8});
+}
+
+function screen(x,y){
+ return {
+  x:(x-camera.x)*camera.zoom+W/2,
+  y:(y-camera.y)*camera.zoom+H/2
+ };
+}
+function convert(x,y){
+ return {
+  x:(x-W/2)/camera.zoom+camera.x,
+  y:(y-H/2)/camera.zoom+camera.y
+ };
+}
+
+function drawGround(){
+ ctx.fillStyle="#536c4b";
+ ctx.fillRect(0,0,W,H);
+
+ const a=convert(0,0),b=convert(W,H);
+ for(let x=Math.floor(a.x/90)*90;x<b.x+90;x+=90){
+  for(let y=Math.floor(a.y/90)*90;y<b.y+90;y+=90){
+   const s=screen(x,y);
+   ctx.fillStyle=(Math.floor(x/90)+Math.floor(y/90))%2?"#60764f":"#4e6548";
+   ctx.globalAlpha=.3;
+   ctx.fillRect(s.x,s.y,90*camera.zoom,90*camera.zoom);
+  }
+ }
+ ctx.globalAlpha=1;
+
+ trees.forEach(t=>{
+  const s=screen(t.x,t.y);
+  if(s.x<-30||s.y<-30||s.x>W+30||s.y>H+30)return;
+  const r=t.r*camera.zoom;
+  ctx.fillStyle="#263e2c";
+  ctx.beginPath();ctx.arc(s.x+2,s.y+4,r+2,0,7);ctx.fill();
+  ctx.fillStyle="#31583a";
+  ctx.beginPath();ctx.arc(s.x,s.y,r,0,7);ctx.fill();
+ });
+}
+
+function drawPlace(p){
+ const s=screen(p.x,p.y),z=camera.zoom;
+ const color=factions[p.f].color;
+
+ ctx.fillStyle="#303b31";
+ ctx.beginPath();ctx.ellipse(s.x,s.y+17*z,45*z,20*z,0,0,7);ctx.fill();
+
+ if(p.type==="شهر"){
+  ctx.fillStyle="#aaa18b";
+  ctx.fillRect(s.x-35*z,s.y-20*z,70*z,40*z);
+  for(let i=0;i<4;i++){
+   ctx.fillStyle="#777e79";
+   ctx.fillRect(s.x+(-28+i*19)*z,s.y-35*z,14*z,30*z);
+  }
+ }else if(p.type==="قلعه"){
+  ctx.fillStyle="#777d78";
+  ctx.fillRect(s.x-40*z,s.y-25*z,80*z,50*z);
+  ctx.fillRect(s.x-45*z,s.y-42*z,18*z,25*z);
+  ctx.fillRect(s.x+27*z,s.y-42*z,18*z,25*z);
+ }else{
+  ctx.fillStyle="#9b8058";
+  ctx.fillRect(s.x-22*z,s.y-15*z,44*z,28*z);
+  ctx.fillStyle="#76533b";
+  ctx.beginPath();
+  ctx.moveTo(s.x-28*z,s.y-15*z);
+  ctx.lineTo(s.x,s.y-38*z);
+  ctx.lineTo(s.x+28*z,s.y-15*z);
+  ctx.fill();
+ }
+
+ ctx.fillStyle=color;
+ ctx.fillRect(s.x-2*z,s.y-52*z,3*z,25*z);
+ ctx.fillStyle="white";
+ ctx.font=`${Math.max(10,12*z)}px Tahoma`;
+ ctx.textAlign="center";
+ ctx.fillText(p.name,s.x,s.y+40*z);
+}
+
+function drawPerson(o,hero=false){
+ const s=screen(o.x,o.y),z=camera.zoom;
+ ctx.fillStyle="#172019";
+ ctx.beginPath();ctx.ellipse(s.x,s.y+7*z,10*z,5*z,0,0,7);ctx.fill();
+
+ ctx.fillStyle=hero?"#e4c16d":o.bandit?"#ad4d43":"#c3c4ad";
+ ctx.beginPath();ctx.arc(s.x,s.y,7*z,0,7);ctx.fill();
+
+ if(hero){
+  ctx.strokeStyle="#fff0b6";
+  ctx.lineWidth=2;
+  ctx.beginPath();ctx.arc(s.x,s.y,12*z,0,7);ctx.stroke();
+  ctx.fillStyle="white";
+  ctx.font="11px Tahoma";
+  ctx.fillText("شما",s.x,s.y-18*z);
+ }
+}
+
+function drawEnemy(e){
+ const s=screen(e.x,e.y),z=camera.zoom;
+ ctx.fillStyle="#56251f";
+ ctx.beginPath();ctx.arc(s.x,s.y,11*z,0,7);ctx.fill();
+ ctx.fillStyle="#fff";
+ ctx.font="11px Tahoma";
+ ctx.textAlign="center";
+ ctx.fillText("راهزن",s.x,s.y-17*z);
+}
+
+function draw(){
+ drawGround();
+ places.forEach(drawPlace);
+ npcs.forEach(n=>{if(n.alive)drawPerson(n)});
+ enemies.forEach(e=>{if(e.alive)drawEnemy(e)});
+ drawPerson(player,true);
+ if(target){
+  const s=screen(target.x,target.y);
+  ctx.strokeStyle="#fff0a8";
+  ctx.beginPath();ctx.arc(s.x,s.y,10,0,7);ctx.stroke();
+ }
+}
+
+function update(dt){
+ let vx=0,vy=0;
+ if(keys.ArrowUp||keys.w)vy--;
+ if(keys.ArrowDown||keys.s)vy++;
+ if(keys.ArrowLeft||keys.a)vx--;
+ if(keys.ArrowRight||keys.d)vx++;
+
+ if(target){
+  const dx=target.x-player.x,dy=target.y-player.y;
+  const d=Math.hypot(dx,dy);
+  if(d>7){vx+=dx/d;vy+=dy/d}
+  else target=null;
+ }
+ const len=Math.hypot(vx,vy);
+ if(len){
+  player.x+=vx/len*player.speed*dt;
+  player.y+=vy/len*player.speed*dt;
+ }
+ player.x=Math.max(15,Math.min(world.w-15,player.x));
+ player.y=Math.max(15,Math.min(world.h-15,player.y));
+
+ npcs.forEach(n=>{
+  if(!n.alive)return;
+  n.phase+=dt;
+  if(n.bandit&&Math.hypot(player.x-n.x,player.y-n.y)<220){
+   const dx=player.x-n.x,dy=player.y-n.y,d=Math.hypot(dx,dy)||1;
+   n.x+=dx/d*n.speed*dt;
+   n.y+=dy/d*n.speed*dt;
+  }else{
+   if(Math.hypot(n.x-n.hx,n.y-n.hy)>100)
+    n.dir=Math.atan2(n.hy-n.y,n.hx-n.x);
+   else if(Math.sin(n.phase)>.96)n.dir+=1.2;
+   n.x+=Math.cos(n.dir)*n.speed*.4*dt;
+   n.y+=Math.sin(n.dir)*n.speed*.4*dt;
+  }
+ });
+
+ enemies.forEach(e=>{
+  if(!e.alive)return;
+  e.phase+=dt;
+  const d=Math.hypot(player.x-e.x,player.y-e.y);
+  if(d<260){
+   const dx=player.x-e.x,dy=player.y-e.y;
+   e.x+=dx/d*e.speed*dt;
+   e.y+=dy/d*e.speed*dt;
+  }else{
+   e.x+=Math.sin(e.phase)*e.speed*.3*dt;
+   e.y+=Math.cos(e.phase)*e.speed*.3*dt;
+  }
+ });
+
+ camera.x+=(player.x-camera.x)*Math.min(1,dt*5);
+ camera.y+=(player.y-camera.y)*Math.min(1,dt*5);
+}
+
+let previous=performance.now();
+function loop(now){
+ const dt=Math.min(.04,(now-previous)/1000);
+ previous=now;
+ update(dt);draw();updateStats();
+ requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+
+function updateStats(){
+ document.getElementById("stats").innerHTML=
+ `سطح ${player.level}<br>سلامتی: ${Math.round(player.hp)}٪<br>طلا: ${player.gold}<br>غذا: ${player.food}<br>شهرت: ${player.fame}<br>سپاه: ${army.inf+army.arch+army.cav+army.spear}`;
+}
+
+function message(t){
+ document.getElementById("message").textContent=t;
+}
+function dialog(title,text,buttons){
+ document.getElementById("title").textContent=title;
+ document.getElementById("description").textContent=text;
+ const box=document.getElementById("options");
+ box.innerHTML="";
+ buttons.forEach(b=>{
+  const el=document.createElement("button");
+  el.textContent=b.label;
+  el.onclick=()=>{b.fn();closeDialog()};
+  box.appendChild(el);
+ });
+ document.getElementById("dialog").style.display="block";
+}
+function closeDialog(){
+ document.getElementById("dialog").style.display="none";
+}
+
+function closest(){
+ let list=[...npcs.filter(n=>n.alive),...enemies.filter(e=>e.alive),...places];
+ list.sort((a,b)=>Math.hypot(a.x-player.x,a.y-player.y)-Math.hypot(b.x-player.x,b.y-player.y));
+ return list[0]&&Math.hypot(list[0].x-player.x,list[0].y-player.y)<180?list[0]:null;
+}
+
+function interact(o){
+ selected=o;
+ if(o.type){
+  dialog(o.name,o.type+" | جمعیت: "+o.pop+" نفر",[
+   {label:"استراحت",fn:()=>{player.hp=Math.min(100,player.hp+15);message("استراحت کردی.")}},
+   {label:"خرید غذا - ۲۰ طلا",fn:()=>{if(player.gold>=20){player.gold-=20;player.food+=12;message("غذا خریدی.")}else message("طلای کافی نداری.")}}
+  ]);
+ }else if(o.men){
+  dialog("گروه راهزن","این گروه "+o.men+" نفر دارد.",[
+   {label:"شروع نبرد",fn:()=>battle(o)}
+  ]);
+ }else{
+  dialog(o.name,"این فرد در این سرزمین زندگی می‌کند. شاید خبری داشته باشد.",[
+   {label:"پرس‌وجو",fn:()=>{player.fame++;message("خبرهایی از راهزنان شنیدی.")}}
+  ]);
+ }
+}
+
+canvas.addEventListener("pointerdown",e=>{
+ const p=convert(e.clientX,e.clientY);
+ let objects=[...npcs.filter(n=>n.alive),...enemies.filter(n=>n.alive),...places];
+ let found=null,dist=45/camera.zoom;
+ objects.forEach(o=>{
+  const d=Math.hypot(o.x-p.x,o.y-p.y);
+  if(d<dist){found=o;dist=d}
+ });
+ if(found)interact(found);
+ else{target=p;message("به سمت مقصد حرکت می‌کنی.")}
+});
+
+function talk(){
+ const o=closest();
+ if(o)interact(o);
+ else message("کسی نزدیک تو نیست.");
+}
+
+function battle(e){
+ const strength=army.inf*2+army.arch*2.4+army.cav*3+army.spear*2.2;
+ const power=e.men*2.3;
+ if(strength+Math.random()*18>power){
+  e.alive=false;
+  player.gold+=35;
+  player.fame+=8;
+  player.hp=Math.max(20,player.hp-8);
+  message("پیروز شدی! ۳۵ طلا غنیمت گرفتی.");
+ }else{
+  player.hp=Math.max(10,player.hp-25);
+  army.inf=Math.max(0,army.inf-1);
+  message("نبرد را باختی و یک پیاده‌نظام از دست رفت.");
+ }
+}
+
+function attack(){
+ const e=enemies.filter(e=>e.alive).sort((a,b)=>
+  Math.hypot(a.x-player.x,a.y-player.y)-Math.hypot(b.x-player.x,b.y-player.y)
+ )[0];
+ if(e&&Math.hypot(e.x-player.x,e.y-player.y)<350){
+  dialog("نبرد","آیا می‌خواهی با گروه دشمن روبه‌رو شوی؟",[
+   {label:"شروع نبرد",fn:()=>battle(e)}
+  ]);
+ }else message("دشمنی در نزدیکی تو نیست.");
+}
+
+function recruit(){
+ dialog("سربازگیری","نوع نیروی خود را انتخاب کن.",[
+  {label:"پیاده‌نظام ۳۰ طلا",fn:()=>hire("inf",30)},
+  {label:"کماندار ۴۰ طلا",fn:()=>hire("arch",40)},
+  {label:"سواره‌نظام ۷۰ طلا",fn:()=>hire("cav",70)},
+  {label:"نیزه‌دار ۳۵ طلا",fn:()=>hire("spear",35)}
+ ]);
+}
+function hire(type,cost){
+ if(player.gold>=cost){
+  player.gold-=cost;army[type]++;
+  message("نیروی جدید به سپاه پیوست.");
+ }else message("طلای کافی نداری.");
+}
+function market(){
+ dialog("بازار","خرید و فروش کالا",[
+  {label:"فروش ۵ غذا و دریافت ۱۵ طلا",fn:()=>{
+   if(player.food>=5){player.food-=5;player.gold+=15;message("غذا فروخته شد.")}
+   else message("غذای کافی نداری.");
+  }},
+  {label:"خرید ۱۰ غذا با ۲۰ طلا",fn:()=>{
+   if(player.gold>=20){player.gold-=20;player.food+=10;message("غذا خریدی.")}
+   else message("طلای کافی نداری.");
+  }}
+ ]);
+}
+function zoom(v){camera.zoom=Math.max(.55,Math.min(1.8,camera.zoom*v))}
+function save(){
+ localStorage.setItem("realmSave",JSON.stringify({player,army,camera}));
+ message("بازی ذخیره شد.");
+}
+try{
+ const s=JSON.parse(localStorage.getItem("realmSave"));
+ if(s){Object.assign(player,s.player);Object.assign(army,s.army);Object.assign(camera,s.camera)}
+}catch(e){}
+
+addEventListener("keydown",e=>{
+ keys[e.key]=true;
+});
+addEventListener("keyup",e=>keys[e.key]=false);
+</script>
+</body>
+</html>
